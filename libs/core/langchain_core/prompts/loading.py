@@ -135,8 +135,9 @@ def _load_examples(config: dict, *, allow_dangerous_paths: bool = False) -> dict
 def _load_output_parser(config: dict) -> dict:
     """Load output parser."""
     if config_ := config.get("output_parser"):
-        if output_parser_type := config_.get("_type") != "default":
-            msg = f"Unsupported output parser {output_parser_type}"
+        output_parser_type = config_.get("_type", "default")
+        if output_parser_type != "default":
+            msg = f"Unsupported output parser {output_parser_type!r}"
             raise ValueError(msg)
         config["output_parser"] = StrOutputParser(**config_)
     return config
@@ -277,6 +278,17 @@ def _load_chat_prompt(
 
     if not template:
         msg = "Can't load chat prompt without template"
+        raise ValueError(msg)
+
+    # Block jinja2 templates for the same reason as _load_prompt: jinja2 can
+    # execute arbitrary code when the template is rendered.
+    template_format = config.get("template_format", "f-string")
+    if template_format == "jinja2":
+        msg = (
+            "Loading chat templates with 'jinja2' format is not supported "
+            "since it can lead to arbitrary code execution. Use 'f-string' "
+            "template format instead."
+        )
         raise ValueError(msg)
 
     return ChatPromptTemplate.from_template(template=template, **config)
