@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import warnings
 from typing import Any
 
 from langchain_core.documents import Document
@@ -51,9 +52,9 @@ class RecursiveJsonSplitter:
         )
 
     @staticmethod
-    def _json_size(data: dict[str, Any]) -> int:
+    def _json_size(data: dict[str, Any], ensure_ascii: bool = True) -> int:
         """Calculate the size of the serialized JSON object."""
-        return len(json.dumps(data))
+        return len(json.dumps(data, ensure_ascii=ensure_ascii))
 
     @staticmethod
     def _set_nested_dict(
@@ -87,6 +88,7 @@ class RecursiveJsonSplitter:
         data: Any,  # noqa: ANN401
         current_path: list[str] | None = None,
         chunks: list[dict[str, Any]] | None = None,
+        ensure_ascii: bool = True,
     ) -> list[dict[str, Any]]:
         """Split json into maximum size dictionaries while preserving structure."""
         current_path = current_path or []
@@ -94,17 +96,17 @@ class RecursiveJsonSplitter:
         if isinstance(data, dict) and data:
             for key, value in data.items():
                 new_path = [*current_path, key]
-                chunk_size = self._json_size(chunks[-1])
+                chunk_size = self._json_size(chunks[-1], ensure_ascii=ensure_ascii)
                 # Measure the actual size contribution including the full nesting
                 # path overhead — _json_size({key: value}) alone underestimates
                 # the insertion cost for deeply nested paths, causing chunks to
                 # silently exceed max_chunk_size.
                 _probe: dict = {}
                 self._set_nested_dict(_probe, new_path, value)
-                size = self._json_size(_probe)
+                size = self._json_size(_probe, ensure_ascii=ensure_ascii)
                 remaining = self.max_chunk_size - chunk_size
 
-                if size < remaining:
+                if size <= remaining:
                     # Add item to current chunk
                     self._set_nested_dict(chunks[-1], new_path, value)
                 else:
@@ -113,9 +115,24 @@ class RecursiveJsonSplitter:
                         chunks.append({})
 
                     # Iterate
-                    self._json_split(value, new_path, chunks)
+                    self._json_split(value, new_path, chunks, ensure_ascii)
         # Handle leaf values and empty dicts
         elif current_path:
+            # Warn when an atomic leaf value cannot fit within max_chunk_size no
+            # matter how the structure is split — the limit is mathematically
+            # unenforceable for indivisible JSON values.
+            _leaf_probe: dict = {}
+            self._set_nested_dict(_leaf_probe, current_path, data)
+            leaf_size = self._json_size(_leaf_probe, ensure_ascii=ensure_ascii)
+            if leaf_size > self.max_chunk_size:
+                warnings.warn(
+                    f"A leaf value at path {current_path!r} has serialized size "
+                    f"{leaf_size} which exceeds max_chunk_size={self.max_chunk_size}. "
+                    "The chunk size limit cannot be enforced for atomic JSON values; "
+                    "the value will be emitted in a single oversized chunk.",
+                    UserWarning,
+                    stacklevel=4,
+                )
             self._set_nested_dict(chunks[-1], current_path, data)
         return chunks
 
@@ -137,7 +154,7 @@ class RecursiveJsonSplitter:
         if convert_lists:
             chunks = self._json_split(self._list_to_dict_preprocessing(json_data))
         else:
-            chunks = self._json_split(json_data)
+            chunks = self._json_split(json_data, ensure_ascii=True)
 
         # Remove the last chunk if it's empty
         if not chunks[-1]:
@@ -161,7 +178,16 @@ class RecursiveJsonSplitter:
         Returns:
             A list of JSON formatted strings.
         """
-        chunks = self.split_json(json_data=json_data, convert_lists=convert_lists)
+        if convert_lists:
+            chunks = self._json_split(
+                self._list_to_dict_preprocessing(json_data),
+                ensure_ascii=ensure_ascii,
+            )
+        else:
+            chunks = self._json_split(json_data, ensure_ascii=ensure_ascii)
+
+        if not chunks[-1]:
+            chunks.pop()
 
         # Convert to string
         return [json.dumps(chunk, ensure_ascii=ensure_ascii) for chunk in chunks]
